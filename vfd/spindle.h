@@ -58,7 +58,7 @@ typedef enum {
 
 typedef struct {
 #if N_SPINDLE > 1 || N_SYS_SPINDLE > 1
-    uint8_t modbus_address[4];
+    uint8_t modbus_address[N_SPINDLE];
 #else
     uint8_t modbus_address;
 #endif
