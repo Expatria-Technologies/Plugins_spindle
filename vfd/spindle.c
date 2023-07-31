@@ -166,6 +166,10 @@ static bool is_vfd_spindle (const setting_detail_t *setting)
             spindle = spindle_get_hal(vfd_spindles[idx].id, SpindleHAL_Raw);
     } while(idx && spindle == NULL);
 
+    #if BOARD_FLEXI_HAL
+    return 1;
+    #endif
+
     return spindle && spindle->type == SpindleType_VFD;
 }
 
@@ -191,6 +195,10 @@ static bool is_modvfd_selected (const setting_detail_t *setting)
         if(spindle_select_get_binding(vfd_spindles[--idx].id) >= 0)
             ok = !strcmp(spindle_get_name(vfd_spindles[idx].id), "MODVFD");
     } while(idx && !ok);
+
+    #if BOARD_FLEXI_HAL
+    return 1;
+    #endif
 
     return ok;
 }
