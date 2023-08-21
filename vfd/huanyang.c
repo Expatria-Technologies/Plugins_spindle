@@ -176,6 +176,9 @@ static void spindleSetState (spindle_state_t state, float rpm)
 // Returns spindle state in a spindle_state_t variable
 static spindle_state_t spindleGetState (void)
 {
+    static uint32_t last_ms;
+    uint32_t ms = hal.get_elapsed_ticks();    
+    
     modbus_message_t rpm_cmd = {
         .context = (void *)VFD_GetRPM,
         .crc_check = false,
@@ -186,8 +189,10 @@ static spindle_state_t spindleGetState (void)
         .tx_length = 8,
         .rx_length = 8
     };
-
-    modbus_send(&rpm_cmd, &callbacks, false); // TODO: add flag for not raising alarm?
+    if(ms > (last_ms + VFD_RETRY_DELAY)){ //don't spam the port
+        modbus_send(&rpm_cmd, &callbacks, false); // TODO: add flag for not raising alarm?
+        last_ms = ms;
+    }   
 
     modbus_message_t amps_cmd = {
         .context = (void *)VFD_GetAmps,
@@ -199,7 +204,10 @@ static spindle_state_t spindleGetState (void)
         .tx_length = 8,
         .rx_length = 8
     };
-    modbus_send(&amps_cmd, &callbacks, false); // TODO: add flag for not raising alarm?
+    if(ms > (last_ms + VFD_RETRY_DELAY)){ //don't spam the port
+        modbus_send(&amps_cmd, &callbacks, false); // TODO: add flag for not raising alarm?
+        last_ms = ms;
+    }       
 
     // Get the actual RPM from spindle encoder input when available.
     if(on_get_data) {
