@@ -177,8 +177,6 @@ static spindle_state_t v1_spindleGetState (void)
         .rx_length = 8
     };
 
-    modbus_send(&rpm_cmd, &v1_callbacks, false); // TODO: add flag for not raising alarm?
-
     modbus_message_t amps_cmd = {
         .context = (void *)VFD_GetAmps,
         .crc_check = false,
@@ -189,7 +187,11 @@ static spindle_state_t v1_spindleGetState (void)
         .tx_length = 8,
         .rx_length = 8
     };
-    modbus_send(&amps_cmd, &v1_callbacks, false); // TODO: add flag for not raising alarm?
+
+    if(modbus_get_queue_status() <= 2){  //do not overload the queue
+        modbus_send(&rpm_cmd, &v1_callbacks, false); // TODO: add flag for not raising alarm?
+        modbus_send(&amps_cmd, &v1_callbacks, false); // TODO: add flag for not raising alarm?
+    }
 
     // Get the actual RPM from spindle encoder input when available.
     if(on_get_data) {

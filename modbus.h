@@ -101,5 +101,7 @@ bool modbus_enabled (void);
 void modbus_set_silence (const modbus_silence_timeout_t *timeout);
 bool modbus_send (modbus_message_t *msg, const modbus_callbacks_t *callbacks, bool block);
 modbus_state_t modbus_get_state (void);
+uint8_t modbus_get_queue_status (void);  //returns number of elements in queue
+
 
 #endif

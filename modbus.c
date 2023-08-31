@@ -81,6 +81,7 @@ static uint32_t rx_timeout = 0, silence_until = 0, silence_timeout;
 static int16_t exception_code = 0;
 static modbus_silence_timeout_t silence;
 static queue_entry_t queue[MODBUS_QUEUE_LENGTH];
+static int queue_position = 0;
 static modbus_settings_t modbus;
 static volatile bool spin_lock = false, is_up = false;
 static volatile queue_entry_t *tail, *head, *packet = NULL;
@@ -167,6 +168,7 @@ static void modbus_poll (void)
                 packet->sent = true;
                 stream.flush_rx_buffer();
                 stream.write(((queue_entry_t *)packet)->msg.adu, ((queue_entry_t *)packet)->msg.tx_length);
+                queue_position--;
             }
             break;
 
@@ -340,12 +342,20 @@ bool modbus_send (modbus_message_t *msg, const modbus_callbacks_t *callbacks, bo
     } else if(packet != &sync_msg) {
         if(head->next != tail) {
             add_message((queue_entry_t *)head, msg, callbacks);
+            queue_position++;
             head->async = true;
             head = head->next;
         }
     }
 
     return !block;
+}
+
+uint8_t modbus_get_queue_status (void)
+{
+    //modbus_poll();
+
+    return queue_position;
 }
 
 modbus_state_t modbus_get_state (void)
@@ -363,6 +373,7 @@ static void modbus_reset (void)
 
         packet = NULL;
         tail = head;
+        queue_position = 0;
 
         silence_until = 0;
         state = ModBus_Idle;
