@@ -6,21 +6,20 @@
 
   Part of grblHAL
 
-  Copyright (c) 2023 Terje Io
+  Copyright (c) 2023-2024 Terje Io
 
-  Grbl is free software: you can redistribute it and/or modify
+  grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
-  Grbl is distributed in the hope that it will be useful,
+  grblHAL is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
-
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include <math.h>
@@ -38,16 +37,36 @@
 #include "grbl/state_machine.h"
 
 static spindle_id_t spindle_id = -1;
-static uint8_t axis_idx = N_AXIS - 1;
+static const uint8_t axis_idx = N_AXIS - 1, axis_mask = 1 << (N_AXIS - 1);
+static bool stopping = false, running = false;
 static st2_motor_t *motor;
 static spindle_data_t spindle_data = {0};
+static axes_signals_t steppers_enabled = {0};
 
 static on_spindle_selected_ptr on_spindle_selected;
 static on_execute_realtime_ptr on_execute_realtime = NULL, on_execute_delay;
+static stepper_enable_ptr stepper_enable;
+
+static void stepperEnable (axes_signals_t enable)
+{
+    steppers_enabled = enable;
+
+    if(running)
+        enable.mask |= axis_mask;
+    else if((settings.steppers.deenergize.mask & axis_mask) == 0)
+        enable.mask &= ~axis_mask;
+
+    stepper_enable(enable);
+}
 
 static void onExecuteRealtime (uint_fast16_t state)
 {
-    st2_motor_run(motor);
+    if(!st2_motor_run(motor)) {
+        if(stopping) {
+            stopping = running = false;
+            hal.stepper.enable(steppers_enabled);
+        }
+    }
 
     on_execute_realtime(state);
 }
@@ -66,6 +85,11 @@ static void spindleSetState (spindle_ptrs_t *spindle, spindle_state_t state, flo
     UNUSED(spindle);
 
     if(state.on) {
+
+        running = true;
+        stopping = false;
+        hal.stepper.enable(steppers_enabled);
+
         if(st2_motor_running(motor)) {
             if(state.ccw != spindle_data.state_programmed.ccw) {
                 st2_motor_stop(motor);
@@ -77,13 +101,14 @@ static void spindleSetState (spindle_ptrs_t *spindle, spindle_state_t state, flo
         } else
             st2_motor_move(motor, state.ccw ? -1.0f : 1.0f, rpm, Stepper2_InfiniteSteps);
     } else
-        st2_motor_stop(motor);
+        stopping = st2_motor_stop(motor);
 
     if(settings.spindle.at_speed_tolerance > 0.0f) {
         float tolerance = rpm * settings.spindle.at_speed_tolerance / 100.0f;
         spindle_data.rpm_low_limit = rpm - tolerance;
         spindle_data.rpm_high_limit = rpm + tolerance;
     }
+
     spindle_data.state_programmed.on = state.on;
     spindle_data.state_programmed.ccw = state.ccw;
     spindle_data.rpm_programmed = spindle_data.rpm = rpm;
@@ -94,7 +119,7 @@ static bool spindleConfig (spindle_ptrs_t *spindle)
     if(spindle == NULL)
         return false;
 
-    return true;
+    return st2_motor_bind_spindle(axis_idx);
 }
 
 #if SPINDLE_SYNC_ENABLE
@@ -139,12 +164,9 @@ static spindle_state_t spindleGetState (spindle_ptrs_t *spindle)
 
     UNUSED(spindle);
 
-    state.on = st2_motor_running(motor);
-
-//    state.value ^= settings.spindle.invert.mask;
-
+    state.on = spindle_data.state_programmed.on;
     state.ccw = spindle_data.state_programmed.ccw;
-    state.at_speed = st2_motor_cruising(motor);
+    state.at_speed = running ? st2_motor_cruising(motor) : !running;
 
     return state;
 }
@@ -166,16 +188,13 @@ static void stepper_spindle_selected (spindle_ptrs_t *spindle)
     hal.spindle_data.reset = spindleDataReset;
 #endif
 }
+
 /*
 static void raise_alarm (sys_state_t state)
 {
     system_raise_alarm(Alarm_Spindle);
 }
 */
-static void warn_disabled (sys_state_t state)
-{
-    report_message("Stepper spindle has been disabled!", Message_Warning);
-}
 
 void stepper_spindle_init (void)
 {
@@ -202,8 +221,11 @@ void stepper_spindle_init (void)
         on_execute_delay = grbl.on_execute_delay;
         grbl.on_execute_delay = onExecuteDelay;
 
+        stepper_enable = hal.stepper.enable;
+        hal.stepper.enable = stepperEnable;
+
     } else
-        protocol_enqueue_rt_command(warn_disabled);
+        protocol_enqueue_foreground_task(report_warning, "Stepper spindle has been disabled!");
 }
 
 #endif

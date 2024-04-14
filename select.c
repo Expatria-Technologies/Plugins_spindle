@@ -1,24 +1,22 @@
 /*
-
   select.c - spindle select plugin
 
   Part of grblHAL
 
-  Copyright (c) 2022-2023 Terje Io
+  Copyright (c) 2022-2024 Terje Io
 
-  Grbl is free software: you can redistribute it and/or modify
+  grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
-  Grbl is distributed in the hope that it will be useful,
+  grblHAL is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
-
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include <math.h>
@@ -36,12 +34,14 @@
 
 #if N_SPINDLE > 1
 
+#define N_SPINDLE_SETTINGS 8
+
 typedef struct {
     spindle_id_t spindle_id;
     tool_id_t min_tool_id;
 } spindle_binding_t;
 
-static spindle_binding_t spindle_setting[8];
+static spindle_binding_t spindle_setting[N_SPINDLE_SETTINGS];
 
 static uint8_t n_spindle;
 static char format[110] = "";
@@ -71,12 +71,12 @@ static status_code_t validate (parser_block_t *gc_block, parameter_words_t *depr
         if(gc_block->words.p) {
             if(isnanf(gc_block->values.p))
                 state = Status_GcodeValueWordMissing;
-            else if(!(isintf(gc_block->values.p) && gc_block->values.p >= 0.0f && gc_block->values.p <= 1.0f))
+            else if(!(isintf(gc_block->values.p) && gc_block->values.p >= 0.0f && gc_block->values.p <= 1.0f && spindle_setting[(uint32_t)gc_block->values.p].spindle_id != -1))
                 state = Status_GcodeValueOutOfRange;
         } else if(gc_block->words.q) {
             if(isnanf(gc_block->values.q))
                 state = Status_GcodeValueWordMissing;
-            else if(!(isintf(gc_block->values.q) && gc_block->values.q >= 0.0f && spindle_setting[(uint32_t)gc_block->values.q].spindle_id != -1))
+            else if(!(isintf(gc_block->values.q) && gc_block->values.q >= 0.0f && gc_block->values.q < (float)N_SPINDLE_SETTINGS && spindle_setting[(uint32_t)gc_block->values.q].spindle_id != -1))
                 state = Status_GcodeValueOutOfRange;
         } else
             state = Status_GcodeValueWordMissing;
@@ -137,7 +137,7 @@ static void report_options (bool newopt)
 
 static bool is_setting2_available (const setting_detail_t *setting)
 {
-    return setting->id == Setting_SpindleToolStart0 || spindle_setting[setting->id - Setting_SpindleToolStart0].spindle_id != -1;
+    return n_spindle && (setting->id == Setting_SpindleToolStart0 || spindle_setting[setting->id - Setting_SpindleToolStart0].spindle_id != -1);
 }
 
 #endif
@@ -277,7 +277,7 @@ static const setting_descr_t spindle_settings_descr[] = {
 #endif // N_SYS_SPINDLE
 };
 
-static void activate_spindles (uint_fast16_t state)
+static void activate_spindles (void *data)
 {
     spindle_id_t idx;
     const setting_detail_t *spindles;
@@ -288,7 +288,7 @@ static void activate_spindles (uint_fast16_t state)
 #if N_SYS_SPINDLE > 1
     for(idx = 1; idx < N_SYS_SPINDLE; idx++) {
 #else
-    for(idx = 1; idx < sizeof(spindle_setting) / sizeof(spindle_binding_t); idx++) {
+    for(idx = 1; idx < N_SPINDLE_SETTINGS; idx++) {
 #endif
         if(spindle_setting[idx].spindle_id >= spindle_get_count())
             spindle_setting[idx].spindle_id = -1;
@@ -331,7 +331,7 @@ static void spindle_settings_save (void)
 // Restore default settings and write to non volatile storage (NVS).
 static void spindle_settings_restore (void)
 {
-    uint_fast8_t idx = sizeof(spindle_setting) / sizeof(spindle_binding_t);
+    uint_fast8_t idx = N_SPINDLE_SETTINGS;
 
     do {
         idx--;
@@ -353,8 +353,25 @@ static void spindle_settings_load (void)
 
 #if N_SYS_SPINDLE == 1
 
-    spindle_num_t idx = N_SPINDLE_SELECTABLE;
+    uint_fast8_t idx, j = 1, k;
 
+    for(idx = 2; idx < N_SPINDLE_SETTINGS; idx++) {
+        for(k = 0; k < idx; k++) {
+            if(k < j && spindle_setting[j].spindle_id == spindle_setting[k].spindle_id)
+                spindle_setting[j].spindle_id = -1;
+            if(spindle_setting[idx].spindle_id == spindle_setting[k].spindle_id)
+                spindle_setting[idx].spindle_id = -1;
+        }
+        if(spindle_setting[j].spindle_id == -1 && spindle_setting[idx].spindle_id != -1) {
+            spindle_setting[j].spindle_id = spindle_setting[idx].spindle_id;
+            spindle_setting[j].min_tool_id = spindle_setting[idx].min_tool_id;
+            spindle_setting[idx].spindle_id = -1;
+        }
+        if(spindle_setting[idx].spindle_id == -1 && spindle_setting[j].spindle_id != -1)
+            j = idx;
+    }
+
+    idx = N_SPINDLE_SELECTABLE;
     do {
         idx--;
         select_by_tool = spindle_setting[idx].spindle_id != -1 && spindle_setting[idx].min_tool_id > 0;
@@ -381,7 +398,7 @@ static void spindle_settings_load (void)
   #endif
 #endif // N_SYS_SPINDLE == 1
 
-    protocol_enqueue_rt_command(activate_spindles);
+    protocol_enqueue_foreground_task(activate_spindles, NULL);
 }
 
 static setting_details_t setting_details = {
@@ -398,11 +415,6 @@ static setting_details_t setting_details = {
 
 #endif
 
-static void warning_msg (uint_fast16_t state)
-{
-    report_message("Spindle select plugin failed to initialize!", Message_Warning);
-}
-
 int8_t spindle_select_get_binding (spindle_id_t spindle_id)
 {
     uint_fast8_t idx = N_SPINDLE;
@@ -418,7 +430,7 @@ int8_t spindle_select_get_binding (spindle_id_t spindle_id)
     return -1;
 }
 
-static void spindle_select_config (uint_fast16_t state)
+static void spindle_select_config (void *data)
 {
 #if N_SYS_SPINDLE > 1
 
@@ -445,9 +457,9 @@ void spindle_select_init (void)
 {
     if((nvs_address = nvs_alloc(sizeof(spindle_setting)))) {
         settings_register(&setting_details);
-        protocol_enqueue_rt_command(spindle_select_config); // delay plugin config until all spindles are registered
+        protocol_enqueue_foreground_task(spindle_select_config, NULL); // delay plugin config until all spindles are registered
     } else
-        protocol_enqueue_rt_command(warning_msg);
+        protocol_enqueue_foreground_task(report_warning, "Spindle select plugin failed to initialize!");
 }
 
 #endif
