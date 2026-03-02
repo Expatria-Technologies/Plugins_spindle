@@ -33,12 +33,21 @@
 
 #include "spindle.h"
 
+// Number of times to poll the VFD for a valid response before giving up.
+// Each attempt will wait up to the modbus rx_timeout + retry_delay ms.
+// With VFD_INIT_RETRIES=10 and default settings this is roughly 1.5 seconds.
+#ifndef VFD_INIT_RETRIES
+#define VFD_INIT_RETRIES 10
+#endif
+
 static uint32_t modbus_address, exceptions = 0;
 static spindle_id_t spindle_id;
 static spindle_ptrs_t *spindle_hal;
 static spindle_state_t spindle_state = {0};
 static spindle_data_t spindle_data = {0};
 static vfd_state_t vfd_state;
+static volatile bool vfd_init_done = false;  // set true once startup poll succeeds
+static volatile uint8_t vfd_init_retries = 0;
 
 static on_spindle_selected_ptr on_spindle_selected;
 static on_report_options_ptr on_report_options;
@@ -46,12 +55,23 @@ static settings_changed_ptr settings_changed;
 
 static void rx_packet (modbus_message_t *msg);
 static void rx_exception (uint8_t code, void *context);
+static void rx_init_packet (modbus_message_t *msg);
+static void rx_init_exception (uint8_t code, void *context);
 
 static const modbus_callbacks_t callbacks = {
     .retries = VFD_RETRIES,
     .retry_delay = VFD_RETRY_DELAY,
     .on_rx_packet = rx_packet,
     .on_rx_exception = rx_exception
+};
+
+// Callbacks used only during the startup polling sequence.
+// These are tolerant of timeouts and do not raise alarms.
+static const modbus_callbacks_t init_callbacks = {
+    .retries = 0,          // no retries - we manage retry loop ourselves
+    .retry_delay = 0,
+    .on_rx_packet = rx_init_packet,
+    .on_rx_exception = rx_init_exception
 };
 
 // TODO: there should be a mechanism to read max RPM from the VFD in order to configure RPM/Hz instead of above define.
@@ -103,7 +123,8 @@ static void spindleSetState (spindle_ptrs_t *spindle, spindle_state_t state, flo
 
     static bool busy = false;
 
-    if(busy)
+    // Block all spindle commands until startup polling has confirmed the VFD is alive.
+    if(!vfd_init_done || busy)
         return;
 
     uint16_t runstop;
@@ -178,6 +199,74 @@ static float f2rpm (uint16_t f)
     return (float)f * (vfd_config.out_multiplier / vfd_config.out_divider);
 }
 
+// ---------------------------------------------------------------------------
+// Startup polling handlers
+// ---------------------------------------------------------------------------
+
+// Called when the VFD responds successfully to our init probe.
+static void rx_init_packet (modbus_message_t *msg)
+{
+    if(!(msg->adu[0] & 0x80)) {
+        // Got a valid response - VFD is alive and ready.
+        vfd_init_done = true;
+        vfd_state = VFD_Ready;
+    }
+}
+
+// Called on timeout or exception during init polling.
+// Retries up to VFD_INIT_RETRIES times, then gives up and raises alarm.
+static void rx_init_exception (uint8_t code, void *context)
+{
+    if(++vfd_init_retries < VFD_INIT_RETRIES) {
+        // Retry: send another probe. The modbus layer will call us again on failure.
+        modbus_message_t probe = {
+            .context = (void *)VFD_GetRPM,
+            .crc_check = false,
+            .adu[0] = modbus_address,
+            .adu[1] = ModBus_ReadHoldingRegisters,
+            .adu[2] = vfd_config.get_freq_reg >> 8,
+            .adu[3] = vfd_config.get_freq_reg & 0xFF,
+            .adu[4] = 0x00,
+            .adu[5] = 0x01,
+            .tx_length = 8,
+            .rx_length = 7
+        };
+        modbus_send(&probe, &init_callbacks, false);
+    } else {
+        // Exhausted retries - mark as failed so the normal exception path is aware,
+        // but do NOT call vfd_failed() here to avoid a hard alarm just from a slow
+        // VFD boot. Instead leave vfd_init_done = false so spindleSetState is gated.
+        // The operator can retry by re-selecting the spindle or resetting.
+        report_warning("MODVFD: VFD did not respond during startup polling.");
+    }
+}
+
+// Send the initial probe to check VFD is alive.
+static void vfd_send_init_probe (void)
+{
+    vfd_init_done = false;
+    vfd_init_retries = 0;
+
+    modbus_message_t probe = {
+        .context = (void *)VFD_GetRPM,
+        .crc_check = false,
+        .adu[0] = modbus_address,
+        .adu[1] = ModBus_ReadHoldingRegisters,
+        .adu[2] = vfd_config.get_freq_reg >> 8,
+        .adu[3] = vfd_config.get_freq_reg & 0xFF,
+        .adu[4] = 0x00,
+        .adu[5] = 0x01,
+        .tx_length = 8,
+        .rx_length = 7
+    };
+
+    modbus_send(&probe, &init_callbacks, false);
+}
+
+// ---------------------------------------------------------------------------
+// Normal operation rx handlers
+// ---------------------------------------------------------------------------
+
 static void rx_packet (modbus_message_t *msg)
 {
     if(!(msg->adu[0] & 0x80)) {
@@ -229,6 +318,9 @@ static void onSpindleSelected (spindle_ptrs_t *spindle)
 
         modbus_set_silence(NULL);
         modbus_address = vfd_get_modbus_address(spindle_id);
+
+        // Kick off the startup polling sequence instead of sending commands immediately.
+        vfd_send_init_probe();
 
 //        spindleGetMaxRPM();
 
